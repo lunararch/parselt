@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -53,10 +54,34 @@ var keys = keyMap{
 		key.WithHelp("ctrl+e", "edit"),
 	),
 	help: key.NewBinding(
-		key.WithKeys("ctrl+h", "?"),
+		key.WithKeys("ctrl+h"),
 		key.WithHelp("ctrl+h", "help"),
 	),
 }
+
+var (
+	titleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FAFAFA")).
+			Background(lipgloss.Color("#7D56F4")).
+			Padding(0, 1)
+
+	statusStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#626262")).
+			Background(lipgloss.Color("#FFFDF5"))
+
+	helpStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#626262"))
+
+	previewStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			Background(lipgloss.Color("#874BFD")).
+			Padding(1, 2)
+
+	editorStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			Background(lipgloss.Color("#04B575")).
+			Padding(0, 1)
+)
 
 type model struct {
 	filename string
@@ -110,35 +135,78 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	var content string
+
+	title := titleStyle.Render("Markdown Editor")
+	if m.filename != "" {
+		title = titleStyle.Render(fmt.Sprintf("Markdown Editor - %s", filepath.Base(m.filename)))
+	}
+
 	modeText := "EDIT"
 	if m.mode == previewMode {
 		modeText = "PREVIEW"
 	}
+	status := statusStyle.Render(fmt.Sprintf(" %s ", modeText))
 
-	help := "ctrl+s: save • ctrl+p: preview • ctrl+e: edit • ctrl+h: help • ctrl+q: quit"
+	header := lipgloss.JoinHorizontal(lipgloss.Left, title, " ", status)
 
+	// Content area (placeholder)
+	if m.mode == editMode {
+		content = editorStyle.Render("Editor placeholder")
+	} else {
+		content = previewStyle.Render("Preview placeholder")
+	}
+
+	help := helpStyle.Render("ctrl+s: save • ctrl+p: preview • ctrl+e: edit • ctrl+h: help • ctrl+q: quit")
 	if m.showHelp {
 		help = m.helpView()
 	}
 
-	return fmt.Sprintf("Markdown Editor - %s\n\n%s", modeText, help)
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		content,
+		help,
+	)
 }
 
 func (m model) helpView() string {
-	helpText := "Markdown Editor Help\n\n"
-	helpText += "Keyboard Shortcuts:\n"
-	for _, binding := range m.keys.FullHelp() {
-		for _, b := range binding {
-			helpText += fmt.Sprintf("  %s: %s\n", b.Keys()[0], b.Help())
-		}
-	}
-	return lipgloss.NewStyle().Padding(1, 2).Render(helpText)
+	help := `
+Keyboard Shortcuts:
+
+  ctrl+s    Save file
+  ctrl+p    Switch to preview mode
+  ctrl+e    Switch to edit mode  
+  ctrl+h    Toggle this help
+  ctrl+q    Quit application
+
+Navigation (Preview Mode):
+  ↑/k       Scroll up
+  ↓/j       Scroll down
+  g         Go to top
+  G         Go to bottom
+  
+Edit Mode:
+  All standard text editing shortcuts work
+  Tab       Insert 2 spaces (for indentation)
+`
+	return helpStyle.Render(help)
 }
 
 func main() {
 	var filename string
+
 	if len(os.Args) > 1 {
 		filename = os.Args[1]
+
+		if _, err := os.Stat(filename); os.IsNotExist(err) {
+			file, err := os.Create(filename)
+			if err != nil {
+				fmt.Printf("Error creating file: %v\n", err)
+				os.Exit(1)
+			}
+			file.Close()
+		}
 	}
 
 	m := initialModel(filename)
