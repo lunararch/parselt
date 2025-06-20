@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -84,6 +86,7 @@ var (
 )
 
 type model struct {
+	textarea textarea.Model
 	filename string
 	mode     mode
 	width    int
@@ -94,22 +97,46 @@ type model struct {
 }
 
 func initialModel(filename string) model {
-	return model{
+	ta := textarea.New()
+	ta.Placeholder = "Start writing your markdown ..."
+	ta.Focus()
+
+	m := model{
+		textarea: ta,
 		filename: filename,
 		mode:     editMode,
 		keys:     keys,
 	}
+
+	if filename != "" {
+		if content, err := ioutil.ReadFile(filename); err == nil {
+			m.content = string(content)
+			m.textarea.SetValue(m.content)
+		}
+	}
+
+	return m
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	return textarea.Blink
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var tiCmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+		headerHeight := 3
+		footerHeight := 3
+		verticalMargins := headerHeight + footerHeight
+
+		m.textarea.SetWidth(msg.Width - 4)
+		m.textarea.SetHeight(msg.Height - verticalMargins)
+
 		return m, nil
 
 	case tea.KeyMsg:
@@ -117,21 +144,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.quit):
 			return m, tea.Quit
 
-		case key.Matches(msg, m.keys.help):
-			m.showHelp = !m.showHelp
-			return m, nil
+		case key.Matches(msg, m.keys.save):
+			return m, m.saveFile()
 
 		case key.Matches(msg, m.keys.preview):
 			m.mode = previewMode
+			m.content = m.textarea.Value()
 			return m, nil
 
 		case key.Matches(msg, m.keys.edit):
 			m.mode = editMode
+			m.textarea.Focus()
+			return m, nil
+
+		case key.Matches(msg, m.keys.help):
+			m.showHelp = !m.showHelp
 			return m, nil
 		}
 	}
 
-	return m, nil
+	if m.mode == editMode {
+		m.textarea, tiCmd = m.textarea.Update(msg)
+	}
+
+	return m, tiCmd
 }
 
 func (m model) View() string {
@@ -150,11 +186,10 @@ func (m model) View() string {
 
 	header := lipgloss.JoinHorizontal(lipgloss.Left, title, " ", status)
 
-	// Content area (placeholder)
 	if m.mode == editMode {
-		content = editorStyle.Render("Editor placeholder")
+		content = editorStyle.Render(m.textarea.View())
 	} else {
-		content = previewStyle.Render("Preview placeholder")
+		content = previewStyle.Render("Preview: " + m.content)
 	}
 
 	help := helpStyle.Render("ctrl+s: save • ctrl+p: preview • ctrl+e: edit • ctrl+h: help • ctrl+q: quit")
@@ -191,6 +226,24 @@ Edit Mode:
   Tab       Insert 2 spaces (for indentation)
 `
 	return helpStyle.Render(help)
+}
+
+func (m model) saveFile() tea.Cmd {
+	return func() tea.Msg {
+		content := m.textarea.Value()
+
+		filename := m.filename
+		if filename == "" {
+			filename = "untitled.md"
+		}
+
+		err := os.WriteFile(filename, []byte(content), 0644)
+		if err != nil {
+			return fmt.Errorf("Error saving file: %v", err)
+		}
+
+		return fmt.Sprintf("Saved to %s", filename)
+	}
 }
 
 func main() {
