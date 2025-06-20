@@ -2,12 +2,12 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -86,14 +86,16 @@ var (
 )
 
 type model struct {
-	textarea textarea.Model
-	filename string
-	mode     mode
-	width    int
-	height   int
-	showHelp bool
-	content  string
-	keys     keyMap
+	textarea   textarea.Model
+	viewport   viewport.Model
+	filename   string
+	mode       mode
+	width      int
+	height     int
+	showHelp   bool
+	content    string
+	renderedMD string
+	keys       keyMap
 }
 
 func initialModel(filename string) model {
@@ -101,15 +103,18 @@ func initialModel(filename string) model {
 	ta.Placeholder = "Start writing your markdown ..."
 	ta.Focus()
 
+	vp := viewport.New(0, 0)
+
 	m := model{
 		textarea: ta,
+		viewport: vp,
 		filename: filename,
 		mode:     editMode,
 		keys:     keys,
 	}
 
 	if filename != "" {
-		if content, err := ioutil.ReadFile(filename); err == nil {
+		if content, err := os.ReadFile(filename); err == nil {
 			m.content = string(content)
 			m.textarea.SetValue(m.content)
 		}
@@ -123,7 +128,10 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var tiCmd tea.Cmd
+	var (
+		tiCmd tea.Cmd
+		vpCmd tea.Cmd
+	)
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -136,6 +144,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.textarea.SetWidth(msg.Width - 4)
 		m.textarea.SetHeight(msg.Height - verticalMargins)
+
+		m.viewport.Width = msg.Width - 4
+		m.viewport.Height = msg.Height - verticalMargins
 
 		return m, nil
 
@@ -150,6 +161,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.preview):
 			m.mode = previewMode
 			m.content = m.textarea.Value()
+			m.renderedMD = m.content
+			m.viewport.SetContent(m.renderedMD)
 			return m, nil
 
 		case key.Matches(msg, m.keys.edit):
@@ -165,9 +178,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.mode == editMode {
 		m.textarea, tiCmd = m.textarea.Update(msg)
+	} else {
+		m.viewport, vpCmd = m.viewport.Update(msg)
 	}
 
-	return m, tiCmd
+	return m, tea.Batch(tiCmd, vpCmd)
 }
 
 func (m model) View() string {
@@ -189,7 +204,7 @@ func (m model) View() string {
 	if m.mode == editMode {
 		content = editorStyle.Render(m.textarea.View())
 	} else {
-		content = previewStyle.Render("Preview: " + m.content)
+		content = previewStyle.Render(m.viewport.View())
 	}
 
 	help := helpStyle.Render("ctrl+s: save • ctrl+p: preview • ctrl+e: edit • ctrl+h: help • ctrl+q: quit")
@@ -239,7 +254,7 @@ func (m model) saveFile() tea.Cmd {
 
 		err := os.WriteFile(filename, []byte(content), 0644)
 		if err != nil {
-			return fmt.Errorf("Error saving file: %v", err)
+			return fmt.Errorf("error saving file: %v", err)
 		}
 
 		return fmt.Sprintf("Saved to %s", filename)
