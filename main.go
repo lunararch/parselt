@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -295,7 +296,6 @@ func (m model) RenderMarkdown(content string) string {
 }
 
 func (m model) htmlToTerminal(html string) string {
-	// First, let's handle HTML entities
 	text := strings.ReplaceAll(html, "&lt;", "<")
 	text = strings.ReplaceAll(text, "&gt;", ">")
 	text = strings.ReplaceAll(text, "&amp;", "&")
@@ -305,6 +305,14 @@ func (m model) htmlToTerminal(html string) string {
 	lines := strings.Split(text, "\n")
 	var formatted []string
 
+	h1TagRe := regexp.MustCompile(`<h1[^>]*>`)
+	h1ContentRe := regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`)
+	h2TagRe := regexp.MustCompile(`<h2[^>]*>`)
+	h2ContentRe := regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`)
+	h3TagRe := regexp.MustCompile(`<h3[^>]*>`)
+	h3ContentRe := regexp.MustCompile(`<h3[^>]*>(.*?)</h3>`)
+	anyTagRe := regexp.MustCompile(`<[^>]*>`)
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -312,11 +320,8 @@ func (m model) htmlToTerminal(html string) string {
 			continue
 		}
 
-		// Process HTML tags and apply styling - use regex to handle attributes
-		if matched, _ := regexp.MatchString(`<h1[^>]*>`, line); matched {
-			// Extract content between h1 tags
-			re := regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`)
-			matches := re.FindStringSubmatch(line)
+		if h1TagRe.MatchString(line) {
+			matches := h1ContentRe.FindStringSubmatch(line)
 			if len(matches) > 1 {
 				content := strings.TrimSpace(matches[1])
 				styled := lipgloss.NewStyle().
@@ -325,9 +330,8 @@ func (m model) htmlToTerminal(html string) string {
 					Render("▶ " + strings.ToUpper(content))
 				formatted = append(formatted, styled)
 			}
-		} else if matched, _ := regexp.MatchString(`<h2[^>]*>`, line); matched {
-			re := regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`)
-			matches := re.FindStringSubmatch(line)
+		} else if h2TagRe.MatchString(line) {
+			matches := h2ContentRe.FindStringSubmatch(line)
 			if len(matches) > 1 {
 				content := strings.TrimSpace(matches[1])
 				styled := lipgloss.NewStyle().
@@ -336,9 +340,8 @@ func (m model) htmlToTerminal(html string) string {
 					Render("▶▶ " + content)
 				formatted = append(formatted, styled)
 			}
-		} else if matched, _ := regexp.MatchString(`<h3[^>]*>`, line); matched {
-			re := regexp.MustCompile(`<h3[^>]*>(.*?)</h3>`)
-			matches := re.FindStringSubmatch(line)
+		} else if h3TagRe.MatchString(line) {
+			matches := h3ContentRe.FindStringSubmatch(line)
 			if len(matches) > 1 {
 				content := strings.TrimSpace(matches[1])
 				styled := lipgloss.NewStyle().
@@ -350,13 +353,10 @@ func (m model) htmlToTerminal(html string) string {
 		} else if strings.Contains(line, "<p>") {
 			content := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(line, "<p>", ""), "</p>", ""))
 			if content != "" {
-				// Regular paragraph text - keep it simple and readable
 				formatted = append(formatted, content)
 			}
 		} else {
-			// Strip any remaining HTML tags for fallback
-			re := regexp.MustCompile(`<[^>]*>`)
-			cleanLine := re.ReplaceAllString(line, "")
+			cleanLine := anyTagRe.ReplaceAllString(line, "")
 			cleanLine = strings.TrimSpace(cleanLine)
 			if cleanLine != "" {
 				formatted = append(formatted, cleanLine)
@@ -369,10 +369,32 @@ func (m model) htmlToTerminal(html string) string {
 
 func main() {
 	var filename string
+	var useGUI bool
 
-	if len(os.Args) > 1 {
+	flag.BoolVar(&useGUI, "gui", false, "Launch GUI version")
+	flag.Parse()
+
+	// Check for GUI flag or if it's passed as argument
+	args := flag.Args()
+	if len(os.Args) > 1 && os.Args[1] == "-gui" {
+		useGUI = true
+	}
+
+	if useGUI {
+		// Launch GUI version
+		gui := NewGUIApp()
+		gui.Run()
+		return
+	}
+
+	// Original terminal version
+	if len(args) > 0 {
+		filename = args[0]
+	} else if len(os.Args) > 1 && os.Args[1] != "-gui" {
 		filename = os.Args[1]
+	}
 
+	if filename != "" {
 		if _, err := os.Stat(filename); os.IsNotExist(err) {
 			file, err := os.Create(filename)
 			if err != nil {
