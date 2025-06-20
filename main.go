@@ -4,12 +4,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/renderer/html"
 )
 
 type mode int
@@ -76,12 +82,12 @@ var (
 
 	previewStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			Background(lipgloss.Color("#874BFD")).
+			BorderForeground(lipgloss.Color("#874BFD")).
 			Padding(1, 2)
 
 	editorStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			Background(lipgloss.Color("#04B575")).
+			BorderForeground(lipgloss.Color("#04B575")).
 			Padding(0, 1)
 )
 
@@ -161,7 +167,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.preview):
 			m.mode = previewMode
 			m.content = m.textarea.Value()
-			m.renderedMD = m.content
+			m.renderedMD = m.RenderMarkdown(m.content)
 			m.viewport.SetContent(m.renderedMD)
 			return m, nil
 
@@ -259,6 +265,106 @@ func (m model) saveFile() tea.Cmd {
 
 		return fmt.Sprintf("Saved to %s", filename)
 	}
+}
+
+func (m model) RenderMarkdown(content string) string {
+	md := goldmark.New(
+		goldmark.WithExtensions(
+			extension.GFM,
+			extension.Table,
+			extension.Strikethrough,
+			extension.TaskList,
+		),
+		goldmark.WithParserOptions(
+			parser.WithAutoHeadingID(),
+		),
+		goldmark.WithRendererOptions(
+			html.WithHardWraps(),
+		),
+	)
+
+	var buf strings.Builder
+	if err := md.Convert([]byte(content), &buf); err != nil {
+		return content
+	}
+
+	htmlOutput := buf.String()
+	fmt.Printf("DEBUG - HTML output:\n%s\n", htmlOutput)
+
+	return m.htmlToTerminal(buf.String())
+}
+
+func (m model) htmlToTerminal(html string) string {
+	// First, let's handle HTML entities
+	text := strings.ReplaceAll(html, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&quot;", `"`)
+	text = strings.ReplaceAll(text, "&#39;", "'")
+
+	lines := strings.Split(text, "\n")
+	var formatted []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			formatted = append(formatted, "")
+			continue
+		}
+
+		// Process HTML tags and apply styling - use regex to handle attributes
+		if matched, _ := regexp.MatchString(`<h1[^>]*>`, line); matched {
+			// Extract content between h1 tags
+			re := regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`)
+			matches := re.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				content := strings.TrimSpace(matches[1])
+				styled := lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("#FF0000")).
+					Render("▶ " + strings.ToUpper(content))
+				formatted = append(formatted, styled)
+			}
+		} else if matched, _ := regexp.MatchString(`<h2[^>]*>`, line); matched {
+			re := regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`)
+			matches := re.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				content := strings.TrimSpace(matches[1])
+				styled := lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("#00FFFF")).
+					Render("▶▶ " + content)
+				formatted = append(formatted, styled)
+			}
+		} else if matched, _ := regexp.MatchString(`<h3[^>]*>`, line); matched {
+			re := regexp.MustCompile(`<h3[^>]*>(.*?)</h3>`)
+			matches := re.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				content := strings.TrimSpace(matches[1])
+				styled := lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("#FFFF00")).
+					Render("▶▶▶ " + content)
+				formatted = append(formatted, styled)
+			}
+		} else if strings.Contains(line, "<p>") {
+			content := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(line, "<p>", ""), "</p>", ""))
+			if content != "" {
+				// Regular paragraph text - keep it simple and readable
+				formatted = append(formatted, content)
+			}
+		} else {
+			// Strip any remaining HTML tags for fallback
+			re := regexp.MustCompile(`<[^>]*>`)
+			cleanLine := re.ReplaceAllString(line, "")
+			cleanLine = strings.TrimSpace(cleanLine)
+			if cleanLine != "" {
+				formatted = append(formatted, cleanLine)
+			}
+		}
+	}
+
+	return strings.Join(formatted, "\n")
 }
 
 func main() {
