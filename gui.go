@@ -208,11 +208,63 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 
 	lines := strings.Split(text, "\n")
 	var result []string
+	var inCodeBlock bool
+	var codeBlockContent []string
+	var codeBlockLang string
 
 	for _, line := range lines {
+		originalLine := line
 		line = strings.TrimSpace(line)
 		if line == "" {
+			if inCodeBlock {
+				codeBlockContent = append(codeBlockContent, "")
+			} else {
+				result = append(result, "")
+			}
+			continue
+		}
+
+		if strings.Contains(line, "<pre><code") {
+			inCodeBlock = true
+			codeBlockContent = []string{}
+			langRe := regexp.MustCompile(`class="language-([^"]*)"`)
+			if matches := langRe.FindStringSubmatch(line); len(matches) > 1 {
+				codeBlockLang = matches[1]
+			} else {
+				codeBlockLang = ""
+			}
+			re := regexp.MustCompile(`<[^>]*>`)
+			content := re.ReplaceAllString(line, "")
+			if strings.TrimSpace(content) != "" {
+				codeBlockContent = append(codeBlockContent, content)
+			}
+			continue
+		}
+
+		if strings.Contains(line, "</code></pre>") {
+			inCodeBlock = false
+			content := strings.ReplaceAll(line, "</code></pre>", "")
+			re := regexp.MustCompile(`<[^>]*>`)
+			content = re.ReplaceAllString(content, "")
+			if strings.TrimSpace(content) != "" {
+				codeBlockContent = append(codeBlockContent, content)
+			}
+
+			if codeBlockLang != "" {
+				result = append(result, "```"+codeBlockLang)
+			} else {
+				result = append(result, "```")
+			}
+			result = append(result, strings.Join(codeBlockContent, "\n"))
+			result = append(result, "```")
 			result = append(result, "")
+			continue
+		}
+
+		if inCodeBlock {
+			re := regexp.MustCompile(`<[^>]*>`)
+			content := re.ReplaceAllString(line, "")
+			codeBlockContent = append(codeBlockContent, content)
 			continue
 		}
 
@@ -248,41 +300,66 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 				result = append(result, "#### "+content)
 				result = append(result, "")
 			}
+		} else if strings.Contains(line, "<ol>") || strings.Contains(line, "</ol>") {
+			continue
+		} else if strings.Contains(line, "<ul>") || strings.Contains(line, "</ul>") {
+			continue
+		} else if strings.Contains(line, "<li>") {
+			content := strings.ReplaceAll(line, "<li>", "")
+			content = strings.ReplaceAll(content, "</li>", "")
+
+			content = g.processInlineFormatting(content)
+			re := regexp.MustCompile(`<[^>]*>`)
+			content = re.ReplaceAllString(content, "")
+			content = strings.TrimSpace(content)
+
+			if content != "" {
+				leadingSpaces := len(originalLine) - len(strings.TrimLeft(originalLine, " \t"))
+				indent := ""
+				bullet := "- "
+
+				if leadingSpaces >= 4 {
+					indent = "    "
+				} else if leadingSpaces >= 2 {
+					indent = "  "
+				}
+
+				numRe := regexp.MustCompile(`(\d+)\.`)
+				if matches := numRe.FindStringSubmatch(content); len(matches) > 1 {
+					bullet = matches[1] + ". "
+					content = numRe.ReplaceAllString(content, "")
+					content = strings.TrimSpace(content)
+				}
+
+				result = append(result, indent+bullet+content)
+			}
 		} else if strings.Contains(line, "<p>") {
 			content := strings.ReplaceAll(line, "<p>", "")
 			content = strings.ReplaceAll(content, "</p>", "")
+			content = g.processInlineFormatting(content)
+			re := regexp.MustCompile(`<[^>]*>`)
+			content = re.ReplaceAllString(content, "")
 			content = strings.TrimSpace(content)
+
 			if content != "" {
 				result = append(result, content)
 				result = append(result, "")
 			}
-		} else if strings.Contains(line, "<strong>") {
-			content := strings.ReplaceAll(line, "<strong>", "**")
-			content = strings.ReplaceAll(content, "</strong>", "**")
+		} else if strings.Contains(line, "<blockquote>") {
+			content := strings.ReplaceAll(line, "<blockquote>", "")
+			content = strings.ReplaceAll(content, "</blockquote>", "")
+			content = g.processInlineFormatting(content)
 			re := regexp.MustCompile(`<[^>]*>`)
 			content = re.ReplaceAllString(content, "")
-			result = append(result, content)
-		} else if strings.Contains(line, "<em>") {
-			content := strings.ReplaceAll(line, "<em>", "*")
-			content = strings.ReplaceAll(content, "</em>", "*")
-			re := regexp.MustCompile(`<[^>]*>`)
-			content = re.ReplaceAllString(content, "")
-			result = append(result, content)
-		} else if strings.Contains(line, "<code>") {
-			content := strings.ReplaceAll(line, "<code>", "`")
-			content = strings.ReplaceAll(content, "</code>", "`")
-			re := regexp.MustCompile(`<[^>]*>`)
-			content = re.ReplaceAllString(content, "")
-			result = append(result, content)
-		} else if strings.Contains(line, "<li>") {
-			content := strings.ReplaceAll(line, "<li>", "- ")
-			content = strings.ReplaceAll(content, "</li>", "")
-			re := regexp.MustCompile(`<[^>]*>`)
-			content = re.ReplaceAllString(content, "")
-			result = append(result, content)
+			content = strings.TrimSpace(content)
+
+			if content != "" {
+				result = append(result, "> "+content)
+			}
 		} else {
+			content := g.processInlineFormatting(line)
 			re := regexp.MustCompile(`<[^>]*>`)
-			cleanLine := re.ReplaceAllString(line, "")
+			cleanLine := re.ReplaceAllString(content, "")
 			cleanLine = strings.TrimSpace(cleanLine)
 			if cleanLine != "" {
 				result = append(result, cleanLine)
@@ -293,12 +370,47 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 	var cleanResult []string
 	for i, line := range result {
 		if line == "" && i > 0 && i < len(result)-1 && result[i-1] == "" {
-			continue
+			continue // Skip consecutive empty lines
 		}
 		cleanResult = append(cleanResult, line)
 	}
-
 	return strings.Join(cleanResult, "\n")
+}
+
+func (g *GUIApp) processInlineFormatting(content string) string {
+	codeRe := regexp.MustCompile(`<code[^>]*>(.*?)</code>`)
+	content = codeRe.ReplaceAllStringFunc(content, func(match string) string {
+		matches := codeRe.FindStringSubmatch(match)
+		if len(matches) > 1 {
+			codeContent := strings.TrimSpace(matches[1])
+			return "`" + codeContent + "`"
+		}
+		return match
+	})
+
+	// Handle bold text
+	strongRe := regexp.MustCompile(`<strong[^>]*>(.*?)</strong>`)
+	content = strongRe.ReplaceAllStringFunc(content, func(match string) string {
+		matches := strongRe.FindStringSubmatch(match)
+		if len(matches) > 1 {
+			boldContent := strings.TrimSpace(matches[1])
+			return "**" + boldContent + "**"
+		}
+		return match
+	})
+
+	// Handle italic text
+	emRe := regexp.MustCompile(`<em[^>]*>(.*?)</em>`)
+	content = emRe.ReplaceAllStringFunc(content, func(match string) string {
+		matches := emRe.FindStringSubmatch(match)
+		if len(matches) > 1 {
+			italicContent := strings.TrimSpace(matches[1])
+			return "*" + italicContent + "*"
+		}
+		return match
+	})
+
+	return content
 }
 
 func (g *GUIApp) newFile() {
@@ -391,7 +503,6 @@ func (g *GUIApp) showAbout() {
 func (g *GUIApp) Run() {
 	g.setupUI()
 
-	// Load file from command line if provided
 	if len(os.Args) > 2 && os.Args[1] == "-gui" {
 		filename := os.Args[2]
 		if content, err := os.ReadFile(filename); err == nil {
