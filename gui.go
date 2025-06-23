@@ -14,10 +14,6 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/extension"
-	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/renderer/html"
 )
 
 type GUIApp struct {
@@ -28,9 +24,9 @@ type GUIApp struct {
 	currentFile string
 	fileLabel   *widget.Label
 	splitPanel  *container.Split
-	//toolbar     *fyne.Container
 
-	model model
+	model       model
+	mdProcessor *SharedMarkdownProcessor
 }
 
 func NewGUIApp() *GUIApp {
@@ -47,9 +43,10 @@ func NewGUIApp() *GUIApp {
 	m := initialModel("")
 
 	return &GUIApp{
-		app:    myApp,
-		window: myWindow,
-		model:  m,
+		app:         myApp,
+		window:      myWindow,
+		model:       m,
+		mdProcessor: NewSharedMarkdownProcessor(),
 	}
 }
 
@@ -69,8 +66,6 @@ func (g *GUIApp) setupUI() {
 	g.fileLabel.TextStyle = fyne.TextStyle{
 		Bold: true,
 	}
-
-	//g.setupToolbar()
 
 	editorContainer := container.NewBorder(
 		widget.NewCard("Editor", "", nil), nil, nil, nil,
@@ -97,19 +92,6 @@ func (g *GUIApp) setupUI() {
 	g.setupEventHandlers()
 	g.setupMenu()
 }
-
-// func (g *GUIApp) setupToolbar() {
-// 	g.toolbar = container.NewHBox(
-// 		widget.NewButton("New", g.newFile),
-// 		widget.NewButton("Open", g.openFile),
-// 		widget.NewButton("Save", g.saveFile),
-// 		widget.NewButton("Save As", g.saveAsFile),
-// 		widget.NewSeparator(),
-// 		widget.NewButton("Toggle View", g.toggleView),
-// 		widget.NewSeparator(),
-// 		widget.NewButton("About", g.showAbout),
-// 	)
-// }
 
 func (g *GUIApp) setupMenu() {
 	newItem := fyne.NewMenuItem("New", g.newFile)
@@ -169,42 +151,13 @@ func (g *GUIApp) updatePreview(content string) {
 		return
 	}
 
-	htmlContent := g.renderMarkdownToHTML(content)
+	htmlContent := g.mdProcessor.ConvertMarkdownToHTML(content)
 	markdownForFyne := g.htmlToMarkdown(htmlContent)
 	g.preview.ParseMarkdown(markdownForFyne)
 }
 
-func (g *GUIApp) renderMarkdownToHTML(content string) string {
-	md := goldmark.New(
-		goldmark.WithExtensions(
-			extension.GFM,
-			extension.Table,
-			extension.Strikethrough,
-			extension.TaskList,
-		),
-		goldmark.WithParserOptions(
-			parser.WithAutoHeadingID(),
-		),
-		goldmark.WithRendererOptions(
-			html.WithHardWraps(),
-		),
-	)
-
-	var buf strings.Builder
-	if err := md.Convert([]byte(content), &buf); err != nil {
-		return content
-	}
-
-	return buf.String()
-
-}
-
 func (g *GUIApp) htmlToMarkdown(html string) string {
-	text := strings.ReplaceAll(html, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&quot;", `"`)
-	text = strings.ReplaceAll(text, "&#39;", "'")
+	text := g.mdProcessor.UnescapeHTML(html)
 
 	lines := strings.Split(text, "\n")
 	var result []string
@@ -227,14 +180,8 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 		if strings.Contains(line, "<pre><code") {
 			inCodeBlock = true
 			codeBlockContent = []string{}
-			langRe := regexp.MustCompile(`class="language-([^"]*)"`)
-			if matches := langRe.FindStringSubmatch(line); len(matches) > 1 {
-				codeBlockLang = matches[1]
-			} else {
-				codeBlockLang = ""
-			}
-			re := regexp.MustCompile(`<[^>]*>`)
-			content := re.ReplaceAllString(line, "")
+			codeBlockLang = g.mdProcessor.ExtractCodeLanguage(line)
+			content := g.mdProcessor.RemoveHTMLTags(line)
 			if strings.TrimSpace(content) != "" {
 				codeBlockContent = append(codeBlockContent, content)
 			}
@@ -244,8 +191,7 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 		if strings.Contains(line, "</code></pre>") {
 			inCodeBlock = false
 			content := strings.ReplaceAll(line, "</code></pre>", "")
-			re := regexp.MustCompile(`<[^>]*>`)
-			content = re.ReplaceAllString(content, "")
+			content = g.mdProcessor.RemoveHTMLTags(content)
 			if strings.TrimSpace(content) != "" {
 				codeBlockContent = append(codeBlockContent, content)
 			}
@@ -262,41 +208,28 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 		}
 
 		if inCodeBlock {
-			re := regexp.MustCompile(`<[^>]*>`)
-			content := re.ReplaceAllString(line, "")
+			content := g.mdProcessor.RemoveHTMLTags(line)
 			codeBlockContent = append(codeBlockContent, content)
 			continue
 		}
 
 		if strings.Contains(line, "<h1") {
-			re := regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`)
-			matches := re.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				content := strings.TrimSpace(matches[1])
+			if content := g.mdProcessor.ExtractHeaderContent(line, 1); content != "" {
 				result = append(result, "# "+content)
 				result = append(result, "")
 			}
 		} else if strings.Contains(line, "<h2") {
-			re := regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`)
-			matches := re.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				content := strings.TrimSpace(matches[1])
+			if content := g.mdProcessor.ExtractHeaderContent(line, 2); content != "" {
 				result = append(result, "## "+content)
 				result = append(result, "")
 			}
 		} else if strings.Contains(line, "<h3") {
-			re := regexp.MustCompile(`<h3[^>]*>(.*?)</h3>`)
-			matches := re.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				content := strings.TrimSpace(matches[1])
+			if content := g.mdProcessor.ExtractHeaderContent(line, 3); content != "" {
 				result = append(result, "### "+content)
 				result = append(result, "")
 			}
 		} else if strings.Contains(line, "<h4") {
-			re := regexp.MustCompile(`<h4[^>]*>(.*?)</h4>`)
-			matches := re.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				content := strings.TrimSpace(matches[1])
+			if content := g.mdProcessor.ExtractHeaderContent(line, 4); content != "" {
 				result = append(result, "#### "+content)
 				result = append(result, "")
 			}
@@ -309,8 +242,7 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 			content = strings.ReplaceAll(content, "</li>", "")
 
 			content = g.processInlineFormatting(content)
-			re := regexp.MustCompile(`<[^>]*>`)
-			content = re.ReplaceAllString(content, "")
+			content = g.mdProcessor.RemoveHTMLTags(content)
 			content = strings.TrimSpace(content)
 
 			if content != "" {
@@ -337,8 +269,7 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 			content := strings.ReplaceAll(line, "<p>", "")
 			content = strings.ReplaceAll(content, "</p>", "")
 			content = g.processInlineFormatting(content)
-			re := regexp.MustCompile(`<[^>]*>`)
-			content = re.ReplaceAllString(content, "")
+			content = g.mdProcessor.RemoveHTMLTags(content)
 			content = strings.TrimSpace(content)
 
 			if content != "" {
@@ -349,8 +280,7 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 			content := strings.ReplaceAll(line, "<blockquote>", "")
 			content = strings.ReplaceAll(content, "</blockquote>", "")
 			content = g.processInlineFormatting(content)
-			re := regexp.MustCompile(`<[^>]*>`)
-			content = re.ReplaceAllString(content, "")
+			content = g.mdProcessor.RemoveHTMLTags(content)
 			content = strings.TrimSpace(content)
 
 			if content != "" {
@@ -358,8 +288,7 @@ func (g *GUIApp) htmlToMarkdown(html string) string {
 			}
 		} else {
 			content := g.processInlineFormatting(line)
-			re := regexp.MustCompile(`<[^>]*>`)
-			cleanLine := re.ReplaceAllString(content, "")
+			cleanLine := g.mdProcessor.RemoveHTMLTags(content)
 			cleanLine = strings.TrimSpace(cleanLine)
 			if cleanLine != "" {
 				result = append(result, cleanLine)
@@ -388,7 +317,6 @@ func (g *GUIApp) processInlineFormatting(content string) string {
 		return match
 	})
 
-	// Handle bold text
 	strongRe := regexp.MustCompile(`<strong[^>]*>(.*?)</strong>`)
 	content = strongRe.ReplaceAllStringFunc(content, func(match string) string {
 		matches := strongRe.FindStringSubmatch(match)
@@ -399,7 +327,6 @@ func (g *GUIApp) processInlineFormatting(content string) string {
 		return match
 	})
 
-	// Handle italic text
 	emRe := regexp.MustCompile(`<em[^>]*>(.*?)</em>`)
 	content = emRe.ReplaceAllStringFunc(content, func(match string) string {
 		matches := emRe.FindStringSubmatch(match)

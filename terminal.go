@@ -12,10 +12,6 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/extension"
-	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/renderer/html"
 )
 
 type mode int
@@ -92,16 +88,17 @@ var (
 )
 
 type model struct {
-	textarea   textarea.Model
-	viewport   viewport.Model
-	filename   string
-	mode       mode
-	width      int
-	height     int
-	showHelp   bool
-	content    string
-	renderedMD string
-	keys       keyMap
+	textarea    textarea.Model
+	viewport    viewport.Model
+	filename    string
+	mode        mode
+	width       int
+	height      int
+	showHelp    bool
+	content     string
+	renderedMD  string
+	keys        keyMap
+	mdProcessor *SharedMarkdownProcessor
 }
 
 type TerminalApp struct {
@@ -129,11 +126,12 @@ func initialModel(filename string) model {
 	vp := viewport.New(0, 0)
 
 	m := model{
-		textarea: ta,
-		viewport: vp,
-		filename: filename,
-		mode:     editMode,
-		keys:     keys,
+		textarea:    ta,
+		viewport:    vp,
+		filename:    filename,
+		mode:        editMode,
+		keys:        keys,
+		mdProcessor: NewSharedMarkdownProcessor(),
 	}
 
 	if filename != "" {
@@ -295,34 +293,12 @@ func (m model) saveFile() tea.Cmd {
 }
 
 func (m model) RenderMarkdown(content string) string {
-	md := goldmark.New(
-		goldmark.WithExtensions(
-			extension.GFM,
-			extension.Table,
-			extension.Strikethrough,
-			extension.TaskList,
-		),
-		goldmark.WithParserOptions(
-			parser.WithAutoHeadingID(),
-		),
-		goldmark.WithRendererOptions(
-			html.WithHardWraps(),
-		),
-	)
-	var buf strings.Builder
-	if err := md.Convert([]byte(content), &buf); err != nil {
-		return content
-	}
-
-	return m.htmlToTerminal(buf.String())
+	htmlContent := m.mdProcessor.ConvertMarkdownToHTML(content)
+	return m.htmlToTerminal(htmlContent)
 }
 
 func (m model) htmlToTerminal(html string) string {
-	text := strings.ReplaceAll(html, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&quot;", `"`)
-	text = strings.ReplaceAll(text, "&#39;", "'")
+	text := m.mdProcessor.UnescapeHTML(html)
 
 	lines := strings.Split(text, "\n")
 	var formatted []string
@@ -336,14 +312,9 @@ func (m model) htmlToTerminal(html string) string {
 	}
 
 	h1TagRe := regexp.MustCompile(`<h1[^>]*>`)
-	h1ContentRe := regexp.MustCompile(`<h1[^>]*>(.*?)</h1>`)
 	h2TagRe := regexp.MustCompile(`<h2[^>]*>`)
-	h2ContentRe := regexp.MustCompile(`<h2[^>]*>(.*?)</h2>`)
 	h3TagRe := regexp.MustCompile(`<h3[^>]*>`)
-	h3ContentRe := regexp.MustCompile(`<h3[^>]*>(.*?)</h3>`)
 	h4TagRe := regexp.MustCompile(`<h4[^>]*>`)
-	h4ContentRe := regexp.MustCompile(`<h4[^>]*>(.*?)</h4>`)
-	anyTagRe := regexp.MustCompile(`<[^>]*>`)
 
 	for _, line := range lines {
 		originalLine := line
@@ -361,15 +332,8 @@ func (m model) htmlToTerminal(html string) string {
 		if strings.Contains(line, "<pre><code") {
 			inCodeBlock = true
 			codeBlockContent = []string{}
-
-			langRe := regexp.MustCompile(`class="language-([^"]*)"`)
-			if matches := langRe.FindStringSubmatch(line); len(matches) > 1 {
-				codeBlockLang = matches[1]
-			} else {
-				codeBlockLang = ""
-			}
-
-			content := anyTagRe.ReplaceAllString(line, "")
+			codeBlockLang = m.mdProcessor.ExtractCodeLanguage(line)
+			content := m.mdProcessor.RemoveHTMLTags(line)
 			if strings.TrimSpace(content) != "" {
 				codeBlockContent = append(codeBlockContent, content)
 			}
@@ -378,9 +342,8 @@ func (m model) htmlToTerminal(html string) string {
 
 		if strings.Contains(line, "</code></pre>") {
 			inCodeBlock = false
-
 			content := strings.ReplaceAll(line, "</code></pre>", "")
-			content = anyTagRe.ReplaceAllString(content, "")
+			content = m.mdProcessor.RemoveHTMLTags(content)
 			if strings.TrimSpace(content) != "" {
 				codeBlockContent = append(codeBlockContent, content)
 			}
@@ -405,22 +368,19 @@ func (m model) htmlToTerminal(html string) string {
 				Margin(1, 0)
 
 			formatted = append(formatted, headerStyle.Render("┌─ "+codeHeader+" ─┐"))
-
 			codeContent := m.wrapCodeBlock(codeBlockContent, availableWidth-6)
 			formatted = append(formatted, blockStyle.Render(codeContent))
 			continue
 		}
 
 		if inCodeBlock {
-			content := anyTagRe.ReplaceAllString(line, "")
+			content := m.mdProcessor.RemoveHTMLTags(line)
 			codeBlockContent = append(codeBlockContent, content)
 			continue
 		}
 
 		if h1TagRe.MatchString(line) {
-			matches := h1ContentRe.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				content := strings.TrimSpace(matches[1])
+			if content := m.mdProcessor.ExtractHeaderContent(line, 1); content != "" {
 				styled := lipgloss.NewStyle().
 					Bold(true).
 					Foreground(lipgloss.Color("#FF0000")).
@@ -430,9 +390,7 @@ func (m model) htmlToTerminal(html string) string {
 				formatted = append(formatted, styled, "")
 			}
 		} else if h2TagRe.MatchString(line) {
-			matches := h2ContentRe.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				content := strings.TrimSpace(matches[1])
+			if content := m.mdProcessor.ExtractHeaderContent(line, 2); content != "" {
 				styled := lipgloss.NewStyle().
 					Bold(true).
 					Foreground(lipgloss.Color("#00FFFF")).
@@ -443,9 +401,7 @@ func (m model) htmlToTerminal(html string) string {
 				formatted = append(formatted, styled, underline, "")
 			}
 		} else if h3TagRe.MatchString(line) {
-			matches := h3ContentRe.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				content := strings.TrimSpace(matches[1])
+			if content := m.mdProcessor.ExtractHeaderContent(line, 3); content != "" {
 				styled := lipgloss.NewStyle().
 					Bold(true).
 					Foreground(lipgloss.Color("#FFFF00")).
@@ -453,9 +409,7 @@ func (m model) htmlToTerminal(html string) string {
 				formatted = append(formatted, styled)
 			}
 		} else if h4TagRe.MatchString(line) {
-			matches := h4ContentRe.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				content := strings.TrimSpace(matches[1])
+			if content := m.mdProcessor.ExtractHeaderContent(line, 4); content != "" {
 				styled := lipgloss.NewStyle().
 					Bold(true).
 					Foreground(lipgloss.Color("#96CEB4")).
@@ -471,7 +425,7 @@ func (m model) htmlToTerminal(html string) string {
 			content = strings.ReplaceAll(content, "</li>", "")
 
 			content = m.processInlineFormatting(content)
-			content = anyTagRe.ReplaceAllString(content, "")
+			content = m.mdProcessor.RemoveHTMLTags(content)
 			content = strings.TrimSpace(content)
 
 			if content != "" {
@@ -505,7 +459,7 @@ func (m model) htmlToTerminal(html string) string {
 			content := strings.ReplaceAll(line, "<p>", "")
 			content = strings.ReplaceAll(content, "</p>", "")
 			content = m.processInlineFormatting(content)
-			content = anyTagRe.ReplaceAllString(content, "")
+			content = m.mdProcessor.RemoveHTMLTags(content)
 			content = strings.TrimSpace(content)
 
 			if content != "" {
@@ -522,7 +476,7 @@ func (m model) htmlToTerminal(html string) string {
 			content := strings.ReplaceAll(line, "<blockquote>", "")
 			content = strings.ReplaceAll(content, "</blockquote>", "")
 			content = m.processInlineFormatting(content)
-			content = anyTagRe.ReplaceAllString(content, "")
+			content = m.mdProcessor.RemoveHTMLTags(content)
 			content = strings.TrimSpace(content)
 
 			if content != "" {
@@ -538,7 +492,7 @@ func (m model) htmlToTerminal(html string) string {
 			}
 		} else {
 			content := m.processInlineFormatting(line)
-			cleanLine := anyTagRe.ReplaceAllString(content, "")
+			cleanLine := m.mdProcessor.RemoveHTMLTags(content)
 			cleanLine = strings.TrimSpace(cleanLine)
 			if cleanLine != "" {
 				if len(cleanLine) > availableWidth {
